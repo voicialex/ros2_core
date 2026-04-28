@@ -1,0 +1,22 @@
+repositories:
+  # Vision — image transport, cv_bridge, camera driver
+  ros2/message_filters:
+    type: git
+    url: https://github.com/ros2/message_filters.git
+    version: jazzy
+  ros/pluginlib:
+    type: git
+    url: https://github.com/ros/pluginlib.git
+    version: jazzy
+  ros-perception/vision_opencv:
+    type: git
+    url: https://github.com/ros-perception/vision_opencv.git
+    version: jazzy
+  ros-perception/image_common:
+    type: git
+    url: https://github.com/ros-perception/image_common.git
+    version: jazzy
+  boldhearts/ros2_v4l2_camera:
+    type: git
+    url: https://gitlab.com/boldhearts/ros2_v4l2_camera.git
+    version: jazzy

@@ -1,0 +1,13 @@
+# Build artifacts
+build/
+install/
+log/
+prebuilt/
+src/*/build/
+src/*/install/
+src/*/log/
+
+# Output
+dist/
+output/
+*.tar.gz
