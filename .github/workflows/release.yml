@@ -20,10 +20,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y \
-            python3-pip libssl-dev libtinyxml2-dev libcurl4-openssl-dev \
-            libtinyxml2-dev python3-yaml
-          pip3 install --break-system-packages \
-            colcon-common-extensions vcstool rosdep
+            python3-pip libssl-dev libtinyxml2-dev libcurl4-openssl-dev python3-yaml
+          # Remove PEP 668 externally-managed marker (both 22.04 and 24.04)
+          sudo rm -f /usr/lib/python3*/EXTERNALLY-MANAGED
+          pip3 install colcon-common-extensions vcstool rosdep
           sudo rosdep init || true
           rosdep update
 
