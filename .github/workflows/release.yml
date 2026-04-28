@@ -21,10 +21,12 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y \
             python3-pip libssl-dev libtinyxml2-dev libcurl4-openssl-dev python3-yaml
-          # Remove PEP 668 externally-managed marker (both 22.04 and 24.04)
           sudo rm -f /usr/lib/python3*/EXTERNALLY-MANAGED
           pip3 install colcon-common-extensions vcstool rosdep
-          sudo rosdep init || true
+
+      - name: Initialize rosdep
+        run: |
+          rosdep init || true
           rosdep update
 
       - name: Build ROS2 ${{ matrix.distro }}
