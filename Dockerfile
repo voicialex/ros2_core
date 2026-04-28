@@ -2,14 +2,17 @@
 # 用法:
 #   ./scripts/docker_build.sh jazzy
 #   ./scripts/docker_build.sh humble -o /tmp
+#
+# 镜像源: 阿里云 (容器镜像 + apt)
 
 ARG DISTRO=jazzy
 
 # ─── Jazzy (Ubuntu 24.04) ───
-FROM ubuntu:24.04 AS build-jazzy
+FROM registry.cn-hangzhou.aliyuncs.com/library/ubuntu:24.04 AS build-jazzy
 ARG DISTRO=jazzy
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN sed -i 's|http://archive.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake git python3-colcon-common-contents \
         libasio-dev libssl-dev libtinyxml2-dev libyaml-dev \
         libpoco-dev libconsole-bridge-dev libspdlog-dev \
@@ -25,10 +28,11 @@ RUN cd /ws/src && \
     && tar czf /ros2-jazzy-x86_64.tar.gz -C install .
 
 # ─── Humble (Ubuntu 22.04) ───
-FROM ubuntu:22.04 AS build-humble
+FROM registry.cn-hangzhou.aliyuncs.com/library/ubuntu:22.04 AS build-humble
 ARG DISTRO=humble
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN sed -i 's|http://archive.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake git python3-colcon-common-contents \
         libasio-dev libssl-dev libtinyxml2-dev libyaml-dev \
         libpoco-dev libconsole-bridge-dev libspdlog-dev \
