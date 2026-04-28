@@ -1,54 +1,53 @@
-# Build ROS2 core from source
-# Usage:
-#   docker build --build-arg DISTRO=jazzy --target export -o type=local,dest=./output .
-#   docker build --build-arg DISTRO=humble --target export -o type=local,dest=./output .
+# Dockerfile — 在干净 Ubuntu 环境中编译 ROS2 核心 (FastDDS only)
+# 用法:
+#   ./scripts/docker_build.sh jazzy
+#   ./scripts/docker_build.sh humble -o /tmp
 
 ARG DISTRO=jazzy
 
 # ─── Jazzy (Ubuntu 24.04) ───
 FROM ubuntu:24.04 AS build-jazzy
-RUN apt-get update && apt-get install -y \
-        build-essential cmake git python3-pip \
-        libssl-dev libtinyxml2-dev libcurl4-openssl-dev python3-yaml \
-    && rm -rf /var/lib/apt/lists/* \
-    && rm -f /usr/lib/python3*/EXTERNALLY-MANAGED \
-    && pip3 install colcon-common-extensions vcstool rosdep \
-    && rosdep init || true && rosdep update
+ARG DISTRO=jazzy
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git python3-colcon-common-contents \
+        libasio-dev libssl-dev libtinyxml2-dev libyaml-dev \
+        libpoco-dev libconsole-bridge-dev libspdlog-dev \
+    && rm -rf /var/lib/apt/lists/*
 COPY src/jazzy /ws/src
-RUN cd /ws && \
-    rosdep install --from-paths src --ignore-src -y --skip-keys "python3" || true && \
+RUN cd /ws/src && \
     colcon build \
         --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
         --packages-up-to \
-            rclcpp_lifecycle std_msgs sensor_msgs \
-            builtin_interfaces rosidl_default_generators && \
-    tar czf /ros2-jazzy-x86_64.tar.gz -C install .
+            rclcpp_components rclcpp_lifecycle \
+            std_msgs sensor_msgs builtin_interfaces \
+            rosidl_default_generators \
+    && tar czf /ros2-jazzy-x86_64.tar.gz -C install .
 
 # ─── Humble (Ubuntu 22.04) ───
 FROM ubuntu:22.04 AS build-humble
-RUN apt-get update && apt-get install -y \
-        build-essential cmake git python3-pip \
-        libssl-dev libtinyxml2-dev libcurl4-openssl-dev python3-yaml \
-    && rm -rf /var/lib/apt/lists/* \
-    && rm -f /usr/lib/python3*/EXTERNALLY-MANAGED \
-    && pip3 install colcon-common-extensions vcstool rosdep \
-    && rosdep init || true && rosdep update
+ARG DISTRO=humble
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git python3-colcon-common-contents \
+        libasio-dev libssl-dev libtinyxml2-dev libyaml-dev \
+        libpoco-dev libconsole-bridge-dev libspdlog-dev \
+    && rm -rf /var/lib/apt/lists/*
 COPY src/humble /ws/src
-RUN cd /ws && \
-    rosdep install --from-paths src --ignore-src -y --skip-keys "python3" || true && \
+RUN cd /ws/src && \
     colcon build \
         --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
         --packages-up-to \
-            rclcpp_lifecycle std_msgs sensor_msgs \
-            builtin_interfaces rosidl_default_generators && \
-    tar czf /ros2-humble-x86_64.tar.gz -C install .
+            rclcpp_components rclcpp_lifecycle \
+            std_msgs sensor_msgs builtin_interfaces \
+            rosidl_default_generators \
+    && tar czf /ros2-humble-x86_64.tar.gz -C install .
 
-# ─── Export stages ───
+# ─── Export (jazzy 默认) ───
 FROM scratch AS export-jazzy
 COPY --from=build-jazzy /ros2-jazzy-*.tar.gz /
 
 FROM scratch AS export-humble
 COPY --from=build-humble /ros2-humble-*.tar.gz /
 
-# Default export (jazzy)
 FROM export-jazzy AS export
