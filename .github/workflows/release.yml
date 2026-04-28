@@ -1,0 +1,51 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:  # 手动触发，CI 待后续完善
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - distro: humble
+            runner: ubuntu-22.04
+          - distro: jazzy
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y \
+            python3-pip libssl-dev libtinyxml2-dev libcurl4-openssl-dev python3-yaml
+          sudo rm -f /usr/lib/python3*/EXTERNALLY-MANAGED
+          pip3 install colcon-common-extensions vcstool rosdep
+
+      - name: Initialize rosdep
+        run: |
+          rosdep init || true
+          rosdep update
+
+      - name: Build ROS2 ${{ matrix.distro }}
+        run: |
+          cd src/${{ matrix.distro }}
+          rosdep install --from-paths . \
+            --ignore-src -y --skip-keys "python3" || true
+          colcon build \
+            --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+            --packages-up-to \
+              rclcpp_lifecycle std_msgs sensor_msgs \
+              builtin_interfaces rosidl_default_generators
+
+      - name: Package
+        run: |
+          ARCH=$(uname -m)
+          cd src/${{ matrix.distro }}
+          tar czf ../../ros2-${{ matrix.distro }}-${ARCH}.tar.gz -C install .
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ros2-${{ matrix.distro }}-*.tar.gz

@@ -1,0 +1,8 @@
+# Build artifacts
+src/*/build/
+src/*/install/
+src/*/log/
+
+# Output
+dist/
+*.tar.gz
