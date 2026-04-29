@@ -32,7 +32,8 @@ jobs:
         run: |
           cd src/${{ matrix.distro }}
           rosdep install --from-paths . \
-            --ignore-src -y --skip-keys "python3" || true
+            --ignore-src -y \
+            --skip-keys "python3 rmw_connextdds rti-connext-dds-6.0.1" || true
           colcon build \
             --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
             --packages-up-to \

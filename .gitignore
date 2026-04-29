@@ -5,4 +5,5 @@ src/*/log/
 
 # Output
 dist/
+output/
 *.tar.gz

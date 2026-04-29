@@ -6,21 +6,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# ─── 函数定义 ───
+
 usage() {
     cat <<'EOF'
 用法: ./scripts/docker_build.sh <distro> [选项]
 
 在干净 Ubuntu 容器中编译 ROS2 核心，生成自包含 tarball。
-无需本机安装 ROS2 或编译工具。
-
 前提: 需要 Docker 已安装并可运行。
 
 参数:
   distro                 humble 或 jazzy
 
 选项:
-  -o, --output DIR       输出目录 (默认: <repo>/dist)
-  -c, --copy-to PATH     部署到指定项目 (默认: ~/buddy_robot)
+  -o, --output DIR       输出目录 (默认: <repo>/output/<distro>)
+  -c, --copy-to PATH     部署到指定路径 (默认: <repo>/output/<distro>/install)
   --no-cache             强制重建 base 镜像
   -h, --help             显示帮助
 
@@ -31,126 +31,106 @@ usage() {
 EOF
 }
 
-# ─── 默认值 ───
-DEFAULT_OUTPUT_DIR="$REPO_ROOT/dist"
-DEFAULT_COPY_TO="$HOME/buddy_robot"
+parse_args() {
+    DISTRO=""
+    OUTPUT_DIR=""
+    COPY_TO=""
+    NO_CACHE=""
 
-# ─── 解析参数 ───
-DISTRO=""
-OUTPUT_DIR=""
-COPY_TO=""
-NO_CACHE=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -h|--help) usage; exit 0 ;;
+            -o|--output) OUTPUT_DIR="${2:?缺少输出目录}"; shift 2 ;;
+            -c|--copy-to) COPY_TO="${2:?缺少目标路径}"; shift 2 ;;
+            --no-cache) NO_CACHE="--no-cache"; shift ;;
+            humble|jazzy) DISTRO="$1"; shift ;;
+            *) echo "未知参数: $1"; usage; exit 1 ;;
+        esac
+    done
 
-while [ $# -gt 0 ]; do
-    case "$1" in
-        -h|--help) usage; exit 0 ;;
-        -o|--output)
-            OUTPUT_DIR="${2:?缺少输出目录}"
-            shift 2
-            ;;
-        -c|--copy-to)
-            COPY_TO="${2:?缺少目标路径}"
-            shift 2
-            ;;
-        --no-cache)
-            NO_CACHE="--no-cache"
-            shift
-            ;;
-        humble|jazzy)
-            DISTRO="$1"
-            shift
-            ;;
-        *)
-            echo "未知参数: $1"
-            usage
-            exit 1
-            ;;
-    esac
-done
+    if [ -z "$DISTRO" ]; then
+        echo "错误: 必须指定 distro (humble 或 jazzy)"
+        usage
+        exit 1
+    fi
 
-if [ -z "$DISTRO" ]; then
-    echo "错误: 必须指定 distro (humble 或 jazzy)"
-    usage
-    exit 1
-fi
+    OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/output/$DISTRO}"
+    COPY_TO="${COPY_TO:-$OUTPUT_DIR/install}"
+    SRC_DIR="$REPO_ROOT/src/$DISTRO"
+}
 
-# 应用默认值
-OUTPUT_DIR="${OUTPUT_DIR:-$DEFAULT_OUTPUT_DIR}"
-if [ -z "$COPY_TO" ] && [ -d "$DEFAULT_COPY_TO" ]; then
-    COPY_TO="$DEFAULT_COPY_TO"
-fi
+preflight_check() {
+    if [ ! -d "$SRC_DIR" ]; then
+        echo "错误: 源码目录不存在: $SRC_DIR"
+        echo "请先运行: ./scripts/update_src.sh $DISTRO"
+        exit 1
+    fi
+    if ! command -v docker &>/dev/null; then
+        echo "错误: Docker 未安装 — https://docs.docker.com/engine/install/"
+        exit 1
+    fi
+    if ! docker info &>/dev/null; then
+        echo "错误: Docker 服务未启动或当前用户无权限"
+        echo "尝试: sudo systemctl start docker && sudo usermod -aG docker \$USER"
+        exit 1
+    fi
+}
 
-SRC_DIR="$REPO_ROOT/src/$DISTRO"
-if [ ! -d "$SRC_DIR" ]; then
-    echo "错误: 源码目录不存在: $SRC_DIR"
-    echo "请先运行: ./scripts/update_src.sh $DISTRO"
-    exit 1
-fi
+build_base_image() {
+    local base_image="ros2-core-build:${DISTRO}-base"
+    if docker image inspect "$base_image" &>/dev/null && [ -z "$NO_CACHE" ]; then
+        echo "[OK] 复用缓存 base 镜像: $base_image"
+    else
+        echo "[INFO] 构建 base 镜像: $base_image ..."
+        docker build $NO_CACHE \
+            --target "base-${DISTRO}" \
+            -t "$base_image" \
+            -f "$REPO_ROOT/Dockerfile" \
+            "$REPO_ROOT"
+        echo "[OK] base 镜像已缓存: $base_image"
+    fi
+}
 
-# 检查 Docker
-if ! command -v docker &>/dev/null; then
-    echo "错误: Docker 未安装"
-    echo "安装: https://docs.docker.com/engine/install/"
-    exit 1
-fi
+do_build() {
+    echo "[INFO] docker build (编译)..."
+    docker build \
+        --target "export-${DISTRO}" \
+        -o "type=local,dest=$OUTPUT_DIR" \
+        -f "$REPO_ROOT/Dockerfile" \
+        "$REPO_ROOT"
 
-if ! docker info &>/dev/null; then
-    echo "错误: Docker 服务未启动或当前用户无权限"
-    echo "尝试: sudo systemctl start docker && sudo usermod -aG docker \$USER"
-    exit 1
-fi
+    if [ ! -f "$OUTPUT_DIR/$TARBALL" ]; then
+        echo "错误: 编译产物未生成: $OUTPUT_DIR/$TARBALL"
+        exit 1
+    fi
+
+    local size
+    size="$(du -sh "$OUTPUT_DIR/$TARBALL" | cut -f1)"
+    echo "[OK] 产物: $OUTPUT_DIR/$TARBALL ($size)"
+}
+
+deploy() {
+    [ -n "$COPY_TO" ] || return 0
+    echo "[INFO] 部署到 $COPY_TO"
+    rm -rf "$COPY_TO"
+    mkdir -p "$COPY_TO"
+    tar xzf "$OUTPUT_DIR/$TARBALL" -C "$COPY_TO"
+    echo "[OK] 已部署到 $COPY_TO"
+}
+
+# ─── 主流程 ───
+
+parse_args "$@"
+preflight_check
 
 ARCH="$(uname -m)"
 TARBALL="ros2-${DISTRO}-${ARCH}.tar.gz"
-BASE_IMAGE="ros2-core-build:${DISTRO}-base"
 
 echo "=========================================="
 echo " Docker 编译 ROS2 ${DISTRO^^} (${ARCH})"
 echo "=========================================="
 
 mkdir -p "$OUTPUT_DIR"
-
-# ─── Step 1: 构建或复用 base 镜像 ───
-if docker image inspect "$BASE_IMAGE" &>/dev/null && [ -z "$NO_CACHE" ]; then
-    echo "[OK] 复用缓存 base 镜像: $BASE_IMAGE"
-else
-    echo "[INFO] 构建 base 镜像: $BASE_IMAGE ..."
-    docker build \
-        $NO_CACHE \
-        --target "base-${DISTRO}" \
-        -t "$BASE_IMAGE" \
-        -f "$REPO_ROOT/Dockerfile" \
-        "$REPO_ROOT"
-    echo "[OK] base 镜像已缓存: $BASE_IMAGE"
-fi
-
-# ─── Step 2: 基于 base 镜像编译 ───
-echo "[INFO] docker build (编译)..."
-docker build \
-    --target "export-${DISTRO}" \
-    -o "type=local,dest=$OUTPUT_DIR" \
-    -f "$REPO_ROOT/Dockerfile" \
-    "$REPO_ROOT"
-
-if [ ! -f "$OUTPUT_DIR/$TARBALL" ]; then
-    echo "错误: 编译产物未生成: $OUTPUT_DIR/$TARBALL"
-    exit 1
-fi
-
-SIZE="$(du -sh "$OUTPUT_DIR/$TARBALL" | cut -f1)"
-echo "[OK] 产物: $OUTPUT_DIR/$TARBALL ($SIZE)"
-
-# ─── 部署到 buddy_robot ───
-if [ -n "$COPY_TO" ]; then
-    INSTALL_DIR="$COPY_TO/third_party/ros2/$DISTRO/install"
-    echo "[INFO] 部署到 $INSTALL_DIR"
-    rm -rf "$INSTALL_DIR"
-    mkdir -p "$INSTALL_DIR"
-    tar xzf "$OUTPUT_DIR/$TARBALL" -C "$INSTALL_DIR"
-    echo "[OK] 已部署到 $INSTALL_DIR"
-    echo ""
-    echo "后续步骤:"
-    echo "  cd $COPY_TO"
-    echo "  bash scripts/build_all.sh build"
-    echo "  bash scripts/build_all.sh test"
-fi
+build_base_image
+do_build
+deploy

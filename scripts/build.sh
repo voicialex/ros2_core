@@ -5,6 +5,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# ─── 要编译的目标包 ───
+TARGET_PKGS=(
+    rclcpp_components rclcpp_lifecycle
+    std_msgs sensor_msgs builtin_interfaces
+    rosidl_default_generators
+)
+
+# ─── 要跳过的测试包 ───
+SKIP_PKGS=(test_msgs test_interface_files)
+
+# ─── 函数定义 ───
+
 usage() {
     cat <<'EOF'
 用法: ./scripts/build.sh <distro> [选项]
@@ -15,8 +27,8 @@ usage() {
   distro                 humble 或 jazzy
 
 选项:
-  -o, --output DIR       输出目录 (默认: <repo>/dist)
-  -c, --copy-to PATH     部署到指定项目 (默认: ~/buddy_robot)
+  -o, --output DIR       输出目录 (默认: <repo>/output/<distro>)
+  -c, --copy-to PATH     部署到指定路径 (默认: <repo>/output/<distro>/install)
   -h, --help             显示帮助
 
 示例:
@@ -26,63 +38,116 @@ usage() {
 EOF
 }
 
-# ─── 默认值 ───
-DEFAULT_OUTPUT_DIR="$REPO_ROOT/dist"
-DEFAULT_COPY_TO="$HOME/buddy_robot"
+parse_args() {
+    DISTRO=""
+    OUTPUT_DIR=""
+    COPY_TO=""
 
-# ─── 解析参数 ───
-DISTRO=""
-OUTPUT_DIR=""
-COPY_TO=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -h|--help) usage; exit 0 ;;
+            -o|--output) OUTPUT_DIR="${2:?缺少输出目录}"; shift 2 ;;
+            -c|--copy-to) COPY_TO="${2:?缺少目标路径}"; shift 2 ;;
+            humble|jazzy) DISTRO="$1"; shift ;;
+            *) echo "未知参数: $1"; usage; exit 1 ;;
+        esac
+    done
 
-while [ $# -gt 0 ]; do
-    case "$1" in
-        -h|--help) usage; exit 0 ;;
-        -o|--output)
-            OUTPUT_DIR="${2:?缺少输出目录}"
-            shift 2
-            ;;
-        -c|--copy-to)
-            COPY_TO="${2:?缺少目标路径}"
-            shift 2
-            ;;
-        humble|jazzy)
-            DISTRO="$1"
-            shift
-            ;;
-        *)
-            echo "未知参数: $1"
-            usage
-            exit 1
-            ;;
-    esac
-done
+    if [ -z "$DISTRO" ]; then
+        echo "错误: 必须指定 distro (humble 或 jazzy)"
+        usage
+        exit 1
+    fi
 
-if [ -z "$DISTRO" ]; then
-    echo "错误: 必须指定 distro (humble 或 jazzy)"
-    usage
-    exit 1
-fi
+    OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/output/$DISTRO}"
+    COPY_TO="${COPY_TO:-$OUTPUT_DIR/install}"
+    SRC_DIR="$REPO_ROOT/src/$DISTRO"
+}
 
-# 应用默认值
-OUTPUT_DIR="${OUTPUT_DIR:-$DEFAULT_OUTPUT_DIR}"
-if [ -z "$COPY_TO" ] && [ -d "$DEFAULT_COPY_TO" ]; then
-    COPY_TO="$DEFAULT_COPY_TO"
-fi
+preflight_check() {
+    if [ ! -d "$SRC_DIR" ]; then
+        echo "错误: 源码目录不存在: $SRC_DIR"
+        echo "请先运行: ./scripts/update_src.sh $DISTRO"
+        exit 1
+    fi
 
-SRC_DIR="$REPO_ROOT/src/$DISTRO"
-if [ ! -d "$SRC_DIR" ]; then
-    echo "错误: 源码目录不存在: $SRC_DIR"
-    echo "请先运行: ./scripts/update_src.sh $DISTRO"
-    exit 1
-fi
+    # 关键包预检
+    local missing=()
+    for pkg in "${TARGET_PKGS[@]}"; do
+        if ! grep -Rqs --include "package.xml" "<name>${pkg}</name>" "$SRC_DIR"; then
+            missing+=("$pkg")
+        fi
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        echo "错误: 源码缺少关键包: ${missing[*]}"
+        echo "修复: rm -rf src/$DISTRO && ./scripts/update_src.sh $DISTRO"
+        exit 1
+    fi
 
-PKG_COUNT="$(find "$SRC_DIR" -name "package.xml" | wc -l)"
-if [ "$PKG_COUNT" -lt 10 ]; then
-    echo "错误: 源码不完整，只找到 $PKG_COUNT 个包（预期 80+）"
-    echo "请重新拉取: rm -rf src/$DISTRO && ./scripts/update_src.sh $DISTRO"
-    exit 1
-fi
+    # 工具链预检
+    if ! command -v colcon &>/dev/null; then
+        echo "错误: 未找到 colcon — pip3 install colcon-common-extensions"
+        exit 1
+    fi
+    if [ ! -f "/usr/include/asio.hpp" ] && [ ! -f "/usr/local/include/asio.hpp" ]; then
+        echo "错误: 未检测到 asio.hpp — sudo apt-get install -y libasio-dev"
+        exit 1
+    fi
+}
+
+clean_env() {
+    # 清除 ROS 相关环境变量，防止 /opt/ros 干扰
+    for var in AMENT_PREFIX_PATH CMAKE_PREFIX_PATH COLCON_PREFIX_PATH \
+               PYTHONPATH LD_LIBRARY_PATH ROS_PACKAGE_PATH ROS_VERSION \
+               ROS_DISTRO ROS_PYTHON_VERSION; do
+        unset "$var" 2>/dev/null || true
+    done
+    export PATH="$(echo "$PATH" | tr ':' '\n' | grep -v '/opt/ros' | paste -sd:)"
+}
+
+mark_ignore_pkgs() {
+    for pkg in "${SKIP_PKGS[@]}"; do
+        find "$SRC_DIR" -path "*/${pkg}/package.xml" \
+            -exec sh -c 'touch "$(dirname "$1")/COLCON_IGNORE"' _ {} \; 2>/dev/null
+    done
+}
+
+do_build() {
+    local build_base="$OUTPUT_DIR/build"
+    local install_base="$OUTPUT_DIR/colcon_install"
+    local log_base="$OUTPUT_DIR/log"
+    rm -rf "$build_base" "$install_base" "$log_base"
+
+    echo "[INFO] colcon build..."
+    colcon --log-base "$log_base" build \
+        --build-base "$build_base" \
+        --install-base "$install_base" \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+                     -DTRACETOOLS_DISABLED=ON --no-warn-unused-cli \
+        --packages-up-to "${TARGET_PKGS[@]}"
+
+    echo "[INFO] 打包 $TARBALL..."
+    mkdir -p "$OUTPUT_DIR"
+    tar czf "$OUTPUT_DIR/$TARBALL" -C "$install_base" .
+
+    local size
+    size="$(du -sh "$OUTPUT_DIR/$TARBALL" | cut -f1)"
+    echo "[OK] 产物: $OUTPUT_DIR/$TARBALL ($size)"
+}
+
+deploy() {
+    [ -n "$COPY_TO" ] || return 0
+    echo "[INFO] 部署到 $COPY_TO"
+    rm -rf "$COPY_TO"
+    mkdir -p "$COPY_TO"
+    tar xzf "$OUTPUT_DIR/$TARBALL" -C "$COPY_TO"
+    echo "[OK] 已部署到 $COPY_TO"
+}
+
+# ─── 主流程 ───
+
+parse_args "$@"
+preflight_check
 
 ARCH="$(uname -m)"
 TARBALL="ros2-${DISTRO}-${ARCH}.tar.gz"
@@ -91,47 +156,8 @@ echo "=========================================="
 echo " 编译 ROS2 ${DISTRO^^} (${ARCH})"
 echo "=========================================="
 
-# ─── 清理环境，确保纯源码编译 ───
-# 清除所有 ROS 相关环境变量，防止 /opt/ros 干扰
-for var in AMENT_PREFIX_PATH CMAKE_PREFIX_PATH COLCON_PREFIX_PATH \
-           PYTHONPATH LD_LIBRARY_PATH ROS_PACKAGE_PATH ROS_VERSION \
-           ROS_DISTRO ROS_PYTHON_VERSION; do
-    unset "$var" 2>/dev/null || true
-done
-# 从 PATH 中移除 /opt/ros 路径
-export PATH="$(echo "$PATH" | tr ':' '\n' | grep -v '/opt/ros' | paste -sd:)"
-
+clean_env
 cd "$SRC_DIR"
-rm -rf build install log
-
-# ─── 编译 ───
-echo "[INFO] colcon build..."
-colcon build \
-    --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
-    --packages-up-to \
-        rclcpp_components rclcpp_lifecycle \
-        std_msgs sensor_msgs builtin_interfaces \
-        rosidl_default_generators
-
-# ─── 打包 ───
-echo "[INFO] 打包 $TARBALL..."
-mkdir -p "$OUTPUT_DIR"
-tar czf "$OUTPUT_DIR/$TARBALL" -C install .
-
-SIZE="$(du -sh "$OUTPUT_DIR/$TARBALL" | cut -f1)"
-echo "[OK] 产物: $OUTPUT_DIR/$TARBALL ($SIZE)"
-
-# ─── 部署到 buddy_robot ───
-if [ -n "$COPY_TO" ]; then
-    INSTALL_DIR="$COPY_TO/third_party/ros2/$DISTRO/install"
-    echo "[INFO] 部署到 $INSTALL_DIR"
-    rm -rf "$INSTALL_DIR"
-    mkdir -p "$INSTALL_DIR"
-    tar xzf "$OUTPUT_DIR/$TARBALL" -C "$INSTALL_DIR"
-    echo "[OK] 已部署到 $INSTALL_DIR"
-    echo ""
-    echo "后续步骤:"
-    echo "  cd $COPY_TO"
-    echo "  bash scripts/build_all.sh build"
-    echo "  bash scripts/build_all.sh test"
-fi
+mark_ignore_pkgs
+do_build
+deploy
