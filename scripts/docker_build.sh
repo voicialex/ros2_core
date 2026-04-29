@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # docker_build.sh — 在干净 Docker 容器中编译 ROS2 核心
+# 自动缓存 base 镜像 (apt + pip 依赖)，加速后续编译
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,6 +21,7 @@ usage() {
 选项:
   -o, --output DIR       输出目录 (默认: <repo>/dist)
   -c, --copy-to PATH     部署到指定项目 (默认: ~/buddy_robot)
+  --no-cache             强制重建 base 镜像
   -h, --help             显示帮助
 
 示例:
@@ -37,6 +39,7 @@ DEFAULT_COPY_TO="$HOME/buddy_robot"
 DISTRO=""
 OUTPUT_DIR=""
 COPY_TO=""
+NO_CACHE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -48,6 +51,10 @@ while [ $# -gt 0 ]; do
         -c|--copy-to)
             COPY_TO="${2:?缺少目标路径}"
             shift 2
+            ;;
+        --no-cache)
+            NO_CACHE="--no-cache"
+            shift
             ;;
         humble|jazzy)
             DISTRO="$1"
@@ -95,6 +102,7 @@ fi
 
 ARCH="$(uname -m)"
 TARBALL="ros2-${DISTRO}-${ARCH}.tar.gz"
+BASE_IMAGE="ros2-core-build:${DISTRO}-base"
 
 echo "=========================================="
 echo " Docker 编译 ROS2 ${DISTRO^^} (${ARCH})"
@@ -102,10 +110,23 @@ echo "=========================================="
 
 mkdir -p "$OUTPUT_DIR"
 
-# ─── Docker 编译 ───
-echo "[INFO] docker build..."
+# ─── Step 1: 构建或复用 base 镜像 ───
+if docker image inspect "$BASE_IMAGE" &>/dev/null && [ -z "$NO_CACHE" ]; then
+    echo "[OK] 复用缓存 base 镜像: $BASE_IMAGE"
+else
+    echo "[INFO] 构建 base 镜像: $BASE_IMAGE ..."
+    docker build \
+        $NO_CACHE \
+        --target "base-${DISTRO}" \
+        -t "$BASE_IMAGE" \
+        -f "$REPO_ROOT/Dockerfile" \
+        "$REPO_ROOT"
+    echo "[OK] base 镜像已缓存: $BASE_IMAGE"
+fi
+
+# ─── Step 2: 基于 base 镜像编译 ───
+echo "[INFO] docker build (编译)..."
 docker build \
-    --build-arg DISTRO="$DISTRO" \
     --target "export-${DISTRO}" \
     -o "type=local,dest=$OUTPUT_DIR" \
     -f "$REPO_ROOT/Dockerfile" \
