@@ -84,13 +84,34 @@ preflight_check() {
         exit 1
     fi
 
+    # 系统库预检（仅检查实际编译中确认必须的库）
+    local SYS_DEPS=(
+        libtinyxml2-dev libasio-dev
+    )
+    local missing_sys=()
+    for dep in "${SYS_DEPS[@]}"; do
+        dpkg -s "$dep" &>/dev/null || missing_sys+=("$dep")
+    done
+    if [ "${#missing_sys[@]}" -gt 0 ]; then
+        echo "错误: 缺少系统依赖:"
+        printf '  %s\n' "${missing_sys[@]}"
+        echo "安装: sudo apt install -y ${missing_sys[*]}"
+        exit 1
+    fi
+
+    # Python 模块预检（仅检查实际编译中确认必须的）
+    local missing_py=()
+    python3 -c "import lark" 2>/dev/null || missing_py+=("python3-lark")
+    if [ "${#missing_py[@]}" -gt 0 ]; then
+        echo "错误: 缺少 Python 模块:"
+        printf '  %s\n' "${missing_py[@]}"
+        echo "安装: sudo apt install -y ${missing_py[*]}"
+        exit 1
+    fi
+
     # 工具链预检
     if ! command -v colcon &>/dev/null; then
         echo "错误: 未找到 colcon — pip3 install colcon-common-extensions"
-        exit 1
-    fi
-    if [ ! -f "/usr/include/asio.hpp" ] && [ ! -f "/usr/local/include/asio.hpp" ]; then
-        echo "错误: 未检测到 asio.hpp — sudo apt-get install -y libasio-dev"
         exit 1
     fi
 }

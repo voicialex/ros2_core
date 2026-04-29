@@ -92,12 +92,18 @@ build_base_image() {
 }
 
 do_build() {
-    echo "[INFO] docker build (编译)..."
-    docker build \
-        --target "export-${DISTRO}" \
-        -o "type=local,dest=$OUTPUT_DIR" \
-        -f "$REPO_ROOT/Dockerfile" \
-        "$REPO_ROOT"
+    echo "[INFO] Docker 编译 (build.sh)..."
+    local base_image="ros2-core-build:${DISTRO}-base"
+    # 传递宿主机代理环境变量，vendor 包需要从 GitHub 下载依赖
+    docker run --rm \
+        --network host \
+        -e http_proxy="${http_proxy:-}" \
+        -e https_proxy="${https_proxy:-}" \
+        -e no_proxy="${no_proxy:-}" \
+        -u "$(id -u):$(id -g)" \
+        -v "$REPO_ROOT:/ws" \
+        "$base_image" \
+        bash /ws/scripts/build.sh "$DISTRO" -o "/ws/output/$DISTRO"
 
     if [ ! -f "$OUTPUT_DIR/$TARBALL" ]; then
         echo "错误: 编译产物未生成: $OUTPUT_DIR/$TARBALL"
