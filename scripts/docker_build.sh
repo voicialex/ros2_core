@@ -20,28 +20,25 @@ usage() {
 
 选项:
   -o, --output DIR       输出目录 (默认: <repo>/output/<distro>)
-  -c, --copy-to PATH     部署到指定路径 (默认: <repo>/output/<distro>/install)
   --no-cache             强制重建 base 镜像
   -h, --help             显示帮助
 
 示例:
   ./scripts/docker_build.sh jazzy
   ./scripts/docker_build.sh humble -o /tmp
-  ./scripts/docker_build.sh jazzy -c ~/buddy_robot
+  ./scripts/docker_build.sh jazzy --no-cache
 EOF
 }
 
 parse_args() {
     DISTRO=""
     OUTPUT_DIR=""
-    COPY_TO=""
     NO_CACHE=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
             -h|--help) usage; exit 0 ;;
             -o|--output) OUTPUT_DIR="${2:?缺少输出目录}"; shift 2 ;;
-            -c|--copy-to) COPY_TO="${2:?缺少目标路径}"; shift 2 ;;
             --no-cache) NO_CACHE="--no-cache"; shift ;;
             humble|jazzy) DISTRO="$1"; shift ;;
             *) echo "未知参数: $1"; usage; exit 1 ;;
@@ -55,7 +52,6 @@ parse_args() {
     fi
 
     OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/output/$DISTRO}"
-    COPY_TO="${COPY_TO:-$OUTPUT_DIR/install}"
     SRC_DIR="$REPO_ROOT/src/$DISTRO"
 }
 
@@ -115,15 +111,6 @@ do_build() {
     echo "[OK] 产物: $OUTPUT_DIR/$TARBALL ($size)"
 }
 
-deploy() {
-    [ -n "$COPY_TO" ] || return 0
-    echo "[INFO] 部署到 $COPY_TO"
-    rm -rf "$COPY_TO"
-    mkdir -p "$COPY_TO"
-    tar xzf "$OUTPUT_DIR/$TARBALL" -C "$COPY_TO"
-    echo "[OK] 已部署到 $COPY_TO"
-}
-
 # ─── 主流程 ───
 
 parse_args "$@"
@@ -136,7 +123,11 @@ echo "=========================================="
 echo " Docker 编译 ROS2 ${DISTRO^^} (${ARCH})"
 echo "=========================================="
 
+START_TIME=$(date +%s)
+
 mkdir -p "$OUTPUT_DIR"
 build_base_image
 do_build
-deploy
+
+ELAPSED=$(( $(date +%s) - START_TIME ))
+printf "[OK] 总耗时: %d分%d秒\n" $((ELAPSED/60)) $((ELAPSED%60))

@@ -28,26 +28,26 @@ usage() {
 
 选项:
   -o, --output DIR       输出目录 (默认: <repo>/output/<distro>)
-  -c, --copy-to PATH     部署到指定路径 (默认: <repo>/output/<distro>/install)
+  -C, --clean            清除编译缓存，全量重新编译
   -h, --help             显示帮助
 
 示例:
   ./scripts/build.sh jazzy
   ./scripts/build.sh jazzy -o /tmp
-  ./scripts/build.sh jazzy -c ~/buddy_robot
+  ./scripts/build.sh jazzy -C            # 全量重新编译
 EOF
 }
 
 parse_args() {
     DISTRO=""
     OUTPUT_DIR=""
-    COPY_TO=""
+    CLEAN_BUILD=false
 
     while [ $# -gt 0 ]; do
         case "$1" in
             -h|--help) usage; exit 0 ;;
             -o|--output) OUTPUT_DIR="${2:?缺少输出目录}"; shift 2 ;;
-            -c|--copy-to) COPY_TO="${2:?缺少目标路径}"; shift 2 ;;
+            -C|--clean) CLEAN_BUILD=true; shift ;;
             humble|jazzy) DISTRO="$1"; shift ;;
             *) echo "未知参数: $1"; usage; exit 1 ;;
         esac
@@ -60,7 +60,6 @@ parse_args() {
     fi
 
     OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/output/$DISTRO}"
-    COPY_TO="${COPY_TO:-$OUTPUT_DIR/install}"
     SRC_DIR="$REPO_ROOT/src/$DISTRO"
 }
 
@@ -137,14 +136,19 @@ do_build() {
     local build_base="$OUTPUT_DIR/build"
     local install_base="$OUTPUT_DIR/colcon_install"
     local log_base="$OUTPUT_DIR/log"
-    rm -rf "$build_base" "$install_base" "$log_base"
+
+    if [ "$CLEAN_BUILD" = true ]; then
+        echo "[INFO] 清除编译缓存 (clean build)..."
+        rm -rf "$build_base" "$install_base" "$log_base"
+    fi
 
     echo "[INFO] colcon build..."
     colcon --log-base "$log_base" build \
         --build-base "$build_base" \
         --install-base "$install_base" \
         --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
-                     -DTRACETOOLS_DISABLED=ON --no-warn-unused-cli \
+                     -DTRACETOOLS_DISABLED=ON -DFORCE_BUILD_VENDOR_PKG=ON \
+                     --no-warn-unused-cli \
         --packages-up-to "${TARGET_PKGS[@]}"
 
     echo "[INFO] 打包 $TARBALL..."
@@ -154,15 +158,6 @@ do_build() {
     local size
     size="$(du -sh "$OUTPUT_DIR/$TARBALL" | cut -f1)"
     echo "[OK] 产物: $OUTPUT_DIR/$TARBALL ($size)"
-}
-
-deploy() {
-    [ -n "$COPY_TO" ] || return 0
-    echo "[INFO] 部署到 $COPY_TO"
-    rm -rf "$COPY_TO"
-    mkdir -p "$COPY_TO"
-    tar xzf "$OUTPUT_DIR/$TARBALL" -C "$COPY_TO"
-    echo "[OK] 已部署到 $COPY_TO"
 }
 
 # ─── 主流程 ───
@@ -177,8 +172,12 @@ echo "=========================================="
 echo " 编译 ROS2 ${DISTRO^^} (${ARCH})"
 echo "=========================================="
 
+START_TIME=$(date +%s)
+
 clean_env
 cd "$SRC_DIR"
 mark_ignore_pkgs
 do_build
-deploy
+
+ELAPSED=$(( $(date +%s) - START_TIME ))
+printf "[OK] 总耗时: %d分%d秒\n" $((ELAPSED/60)) $((ELAPSED%60))

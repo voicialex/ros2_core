@@ -42,3 +42,10 @@ git tag vYYYY.MM.N && git push --tags
 - Middleware: FastDDS only (no Connext/Cyclone).
 - Repo counts: Humble 33, Jazzy 35 (Jazzy adds `rosidl_core`, `rosidl_dynamic_typesupport*`).
 - Output: `output/<distro>/ros2-<distro>-<arch>.tar.gz`.
+- Versioning: `VERSION` file contains `vYYYY.MM.N`; pushing a matching tag triggers `.github/workflows/release.yml` which Docker-builds both distros and publishes to GitHub Releases.
+
+## Shell Script Conventions
+
+- All scripts use `set -euo pipefail` and take distro (`humble`|`jazzy`) as first positional arg.
+- Scripts are idempotent — safe to re-run without side effects.
+- Env vars: `REPO_ROOT`, `OUTPUT_DIR`, `DISTRO` (uppercase).
