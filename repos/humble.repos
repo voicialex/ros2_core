@@ -21,6 +21,12 @@ repositories:
     url: https://github.com/ros/ros_environment.git
     version: humble
 
+  # Header-only libraries (1)
+  chriskohlhoff/asio:
+    type: git
+    url: https://github.com/chriskohlhoff/asio.git
+    version: asio-1-30-2
+
   # Middleware (3)
   eProsima/Fast-CDR:
     type: git
@@ -85,7 +91,11 @@ repositories:
     url: https://github.com/ros/class_loader.git
     version: humble
 
-  # Vendor packages (6)
+  # Vendor packages (7)
+  leethomason/tinyxml2:
+    type: git
+    url: https://github.com/leethomason/tinyxml2.git
+    version: 9.0.0
   ros2/spdlog_vendor:
     type: git
     url: https://github.com/ros2/spdlog_vendor.git
