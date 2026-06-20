@@ -1,9 +1,6 @@
 # toolchain/aarch64-linux-gnu.cmake
-# Cross-compilation toolchain for aarch64 (ARM64) targets
-# Used by: colcon build --cmake-args -DCMAKE_TOOLCHAIN_FILE=<this file>
-#
-# NOTE: We keep CMAKE_FIND_ROOT_PATH_MODE settings relaxed because colcon
-# builds packages incrementally and sets CMAKE_PREFIX_PATH via env var.
+# Cross-compilation toolchain for aarch64 (ARM64) targets.
+# Usage: colcon build --cmake-args -DCMAKE_TOOLCHAIN_FILE=<this-file>
 
 set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR aarch64)
@@ -25,3 +22,19 @@ endif()
 
 # Ensure PIC for shared libraries
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# Pre-filled TRY_RUN results (target binaries can't execute on host)
+include("${CMAKE_CURRENT_LIST_DIR}/aarch64-tryrun-results.cmake")
+
+# Cross-compiled Python — hint FindPythonLibs (used by rosidl_generator_py)
+execute_process(
+  COMMAND python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+  OUTPUT_VARIABLE _py_ver
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+set(PYTHON_INCLUDE_DIR "/usr/include/python${_py_ver}" CACHE PATH "Python include directory (target arch)")
+set(PYTHON_LIBRARY "/usr/lib/${CMAKE_SYSTEM_PROCESSOR}-linux-gnu/libpython${_py_ver}.so" CACHE FILEPATH "Python library (target arch)")
+# Jazzy+FindPython3 hints (CMake >=3.28 uses FindPython3 via rosidl_generator_py)
+set(Python3_INCLUDE_DIR "/usr/include/python${_py_ver}" CACHE PATH "Python3 include directory (target arch)")
+set(Python3_LIBRARY "/usr/lib/${CMAKE_SYSTEM_PROCESSOR}-linux-gnu/libpython${_py_ver}.so" CACHE FILEPATH "Python3 library (target arch)")
+unset(_py_ver)

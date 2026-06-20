@@ -12,14 +12,11 @@ ros2_core is a minimal C++ ROS2 core library packaging repo for [buddy_robot](ht
 # Pull/update ROS2 + vendor 上游源码（均在 repos/<distro>*.repos 声明）
 ./scripts/update_src.sh jazzy    # or humble
 
-# Build locally (requires colcon, cmake, libasio-dev)
-./scripts/build.sh jazzy
-./scripts/build.sh humble -o /tmp
-
-# Build in Docker (preferred — clean reproducible build)
-./scripts/docker_build.sh jazzy
-./scripts/docker_build.sh jazzy --no-cache
-./scripts/docker_build.sh humble -c ~/buddy_robot
+# Build (默认 Docker，加 --native 在宿主机直接编译)
+./scripts/build.sh jazzy                     # Docker x86_64
+./scripts/build.sh humble -t arm64           # Docker 交叉编译 aarch64
+./scripts/build.sh humble -t arm64 --no-cache  # 重建镜像后交叉编译
+./scripts/build.sh humble --native           # 宿主机直接编译
 
 # Release
 git tag vYYYY.MM.N && git push --tags
@@ -30,8 +27,7 @@ git tag vYYYY.MM.N && git push --tags
 - `repos/humble.repos`, `repos/jazzy.repos` — vcstool manifests (single source of truth for which repos to vendor).
 - `src/humble/`, `src/jazzy/` — Vendored ROS2 source trees, committed to git. Synced declaratively from `.repos` files via `update_src.sh`.
 - `scripts/update_src.sh` — Declarative sync: adds new repos, removes stale ones, cleans nested `.git` dirs.
-- `scripts/build.sh` — Native build: colcon compile → tarball. Functions: `parse_args`, `preflight_check`, `clean_env`, `mark_ignore_pkgs`, `do_build`, `deploy`.
-- `scripts/docker_build.sh` — Docker build: two-stage (cached base image + build). Functions: `parse_args`, `preflight_check`, `build_base_image`, `do_build`, `deploy`.
+- `scripts/build.sh` — 统一编译入口：默认走 Docker（推荐），`--native` 在宿主机直接编译。含 colcon compile、交叉编译 toolchain、打包 tarball。
 - `Dockerfile` — Multi-stage build for Humble (22.04) and Jazzy (24.04).
 
 ## Key Build Details

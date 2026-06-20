@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# build.sh — 从源码编译 ROS2 核心并打包为自包含 tarball
+# build.sh — 编译 ROS2 核心并打包为自包含 tarball
+# 默认走 Docker（推荐），加 --native 在宿主机直接编译。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,72 +37,57 @@ SKIP_PKGS=(test_msgs test_interface_files ros2cli_test_interfaces)
 
 usage() {
   cat <<'EOF'
-用法: ./scripts/build.sh <distro> [选项]
+用法: ./scripts/build.sh [distro] [选项]
 
-从源码编译 ROS2 核心并打包为自包含 tarball。
+从源码编译 ROS2 核心并打包为自包含 tarball。默认使用 Docker 编译 humble x86_64。
 
 参数:
-  distro                 humble 或 jazzy
+  distro                 目标发行版: humble (默认) 或 jazzy
 
 选项:
   -t, --arch ARCH        目标架构: x86_64 (默认) 或 arm64/aarch64
   -o, --output DIR       输出目录 (默认: <repo>/output/<distro>)
-  -c, --clean            清除编译缓存，全量重新编译
+  -c, --clean            清除 colcon 编译缓存，全量重编
+  --no-cache             强制重建 Docker base 镜像（仅 Docker 模式）
+  --native               在宿主机直接编译（跳过 Docker）
+  --all                  全编译: humble/jazzy × x86_64/aarch64 (用于发版)
   -h, --help             显示帮助
 
 示例:
-  ./scripts/build.sh humble
-  ./scripts/build.sh humble --arch arm64
-  ./scripts/build.sh humble -c
-
-Docker 编译 (推荐干净环境):
-  ./scripts/docker_build.sh <distro> [选项]
-  Dockerfile 或 base 镜像变更后加 --no-cache 强制重建 base，例如:
-  ./scripts/docker_build.sh humble --no-cache
+  ./scripts/build.sh                        # Docker 编译 humble x86_64
+  ./scripts/build.sh -t arm64               # Docker 交叉编译 humble aarch64
+  ./scripts/build.sh jazzy --native         # 宿主机编译 jazzy x86_64
+  ./scripts/build.sh --all                  # 全编译 4 个 tarball
+  ./scripts/build.sh --all --no-cache       # 重建镜像后全编译
 EOF
 }
 
 parse_args() {
-  DISTRO=""
+  DISTRO="humble"
   OUTPUT_DIR=""
   CLEAN_BUILD=false
   TARGET_ARCH="$(uname -m)"
+  BUILD_MODE="docker"
+  NO_CACHE=""
+  BUILD_ALL=false
 
   while [ $# -gt 0 ]; do
     case "$1" in
-    -h | --help)
-      usage
-      exit 0
-      ;;
-    -o | --output)
-      OUTPUT_DIR="${2:?缺少输出目录}"
-      shift 2
-      ;;
-    -c | --clean)
-      CLEAN_BUILD=true
-      shift
-      ;;
-    -t | --arch)
-      TARGET_ARCH="${2:?缺少架构}"
-      shift 2
-      ;;
-    humble | jazzy)
-      DISTRO="$1"
-      shift
-      ;;
-    *)
-      echo "未知参数: $1"
-      usage
-      exit 1
-      ;;
+      -h|--help) usage; exit 0 ;;
+      -o|--output) OUTPUT_DIR="${2:?缺少输出目录}"; shift 2 ;;
+      -c|--clean) CLEAN_BUILD=true; shift ;;
+      --no-cache) NO_CACHE="--no-cache"; shift ;;
+      --native) BUILD_MODE="native"; shift ;;
+      --in-docker) BUILD_MODE="in-docker"; shift ;;
+      --all) BUILD_ALL=true; shift ;;
+      -t|--arch)
+        TARGET_ARCH="${2:?缺少架构}"
+        shift 2
+        ;;
+      humble|jazzy) DISTRO="$1"; shift ;;
+      *) echo "未知参数: $1"; usage; exit 1 ;;
     esac
   done
-
-  if [ -z "$DISTRO" ]; then
-    echo "错误: 必须指定 distro (humble 或 jazzy)"
-    usage
-    exit 1
-  fi
 
   # Normalize arch names
   case "$TARGET_ARCH" in
@@ -112,7 +98,10 @@ parse_args() {
 
   OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/output/$DISTRO}"
   SRC_DIR="$REPO_ROOT/src/$DISTRO"
+  TARBALL="ros2-${DISTRO}-${TARGET_ARCH}.tar.gz"
 }
+
+# ─── native / in-docker 构建流程 ───
 
 preflight_check() {
   if [ ! -d "$SRC_DIR" ]; then
@@ -124,8 +113,6 @@ preflight_check() {
   # Cross-compile: check OpenSSL headers for target arch
   if [ "$TARGET_ARCH" != "$(uname -m)" ]; then
     echo "[INFO] 交叉编译模式: 目标架构 $TARGET_ARCH"
-
-    # 检查交叉编译所需的 OpenSSL 开发头文件
     local cross_ssl_dir=""
     case "$TARGET_ARCH" in
       aarch64) cross_ssl_dir="/usr/include/aarch64-linux-gnu/openssl" ;;
@@ -141,7 +128,7 @@ preflight_check() {
       echo "  sudo apt install libssl-dev:arm64"
       echo ""
       echo "提示: 推荐使用 Docker 编译以避免交叉依赖问题:"
-      echo "  ./scripts/docker_build.sh $DISTRO"
+      echo "  ./scripts/build.sh $DISTRO"
       exit 1
     fi
   fi
@@ -167,9 +154,6 @@ preflight_check() {
     fi
   fi
 
-  # Cross-compile: remove packages that are COLCON_IGNORE'd
-  # (currently none — rclpy and rosidl_generator_py are enabled with libpython3-dev:arm64)
-
   # 关键包预检 (用 colcon 索引，避免误匹配依赖名)
   if ! command -v colcon &>/dev/null; then
     echo "错误: 未找到 colcon — pip3 install colcon-common-extensions"
@@ -191,8 +175,7 @@ preflight_check() {
     exit 1
   fi
 
-  # Vision 模块系统依赖预检 (skip for cross-compile, handled in Docker)
-  # NOTE: OpenCV 由 thirdparty 提供，不再依赖系统 libopencv-dev
+  # Vision 模块系统依赖预检
   if [ "$ENABLE_VISION" = true ] && [ "$TARGET_ARCH" = "$(uname -m)" ]; then
     local missing_sys=()
     dpkg -s libboost-dev &>/dev/null || missing_sys+=("libboost-dev (cv_bridge 需要 Boost)")
@@ -221,10 +204,8 @@ preflight_check() {
       exit 1
     fi
   fi
-
 }
 
-# 清除 vendor 路径重命名后残留的 CMake 缓存
 purge_stale_vendor_builds() {
   local build_base=$1
   local foonathan_build="$build_base/foonathan_memory_vendor"
@@ -273,7 +254,7 @@ do_build() {
   local asio_include="$SRC_DIR/chriskohlhoff/asio/asio/include"
   local tinyxml2_dir="$SRC_DIR/ros2/tinyxml2_vendor/tinyxml2_src"
 
-  # OpenCV: 从 thirdparty 获取 (自动解析路径)
+  # OpenCV: 从 thirdparty 获取
   local opencv_dir="${OPENCV_DIR:-$REPO_ROOT/../thirdparty/output/$TARGET_ARCH/opencv}"
   if [ ! -d "$opencv_dir" ]; then
     echo "[ERROR] OpenCV not found at $opencv_dir"
@@ -282,7 +263,6 @@ do_build() {
   fi
   echo "[INFO] Using OpenCV from: $opencv_dir"
 
-  # Common cmake args (shared between x86 and arm64)
   local cmake_args=(
     -DCMAKE_BUILD_TYPE=Release
     -DBUILD_TESTING=OFF
@@ -312,14 +292,9 @@ do_build() {
       toolchain="/opt/toolchain/aarch64-linux-gnu.cmake"
     fi
     cmake_args+=(-DCMAKE_TOOLCHAIN_FILE="$toolchain")
-    # Pre-fill TRY_RUN results (can't execute target binaries on host)
-    # Fast-DDS shared_mutex priority check: works on Linux aarch64
-    cmake_args+=(-DSM_RUN_RESULT=0 -DSM_RUN_RESULT__TRYRUN_OUTPUT="PTHREAD_RWLOCK_PREFER_READER_NP")
-    cmake_args+=(-DSM_RUN_OUTPUT="PTHREAD_RWLOCK_PREFER_READER_NP")
-    # merge-install puts all libs under one dir; single rpath-link suffices
+    echo "[INFO] 使用交叉编译 toolchain: $toolchain"
     cmake_args+=("-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,$install_base/lib")
     cmake_args+=("-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-rpath-link,$install_base/lib")
-    echo "[INFO] 使用交叉编译 toolchain: $toolchain"
   fi
 
   local merge_install_arg=()
@@ -344,23 +319,221 @@ do_build() {
   echo "[OK] 产物: $arch_dir/$TARBALL ($size)"
 }
 
+# ─── Docker 模式 ───
+
+docker_preflight() {
+  if [ ! -d "$SRC_DIR" ]; then
+    echo "错误: 源码目录不存在: $SRC_DIR"
+    echo "请先运行: ./scripts/update_src.sh $DISTRO"
+    exit 1
+  fi
+  if ! command -v docker &>/dev/null; then
+    echo "错误: Docker 未安装 — https://docs.docker.com/engine/install/"
+    exit 1
+  fi
+  if ! docker info &>/dev/null; then
+    echo "错误: Docker 服务未启动或当前用户无权限"
+    echo "尝试: sudo systemctl start docker && sudo usermod -aG docker \$USER"
+    exit 1
+  fi
+}
+
+get_image_name() {
+  echo "ros2-core/${DISTRO}:dev"
+}
+
+docker_build_base_image() {
+  local base_image
+  base_image="$(get_image_name)"
+
+  if docker image inspect "$base_image" &>/dev/null && [ -z "$NO_CACHE" ]; then
+    echo "[OK] 复用缓存 base 镜像: $base_image"
+  else
+    echo "[INFO] 构建 base 镜像: $base_image ..."
+    docker build $NO_CACHE \
+      --target "$DISTRO" \
+      -t "$base_image" \
+      -f "$REPO_ROOT/Dockerfile" \
+      "$REPO_ROOT"
+    echo "[OK] base 镜像已缓存: $base_image"
+  fi
+}
+
+sync_prebuilt() {
+  local name=$1 src=$2 dst=$3 check_file=$4
+  mkdir -p "$dst"
+
+  if [ ! -d "$src" ]; then
+    echo "[ERROR] $name not found at $src"
+    echo "[HINT] Build thirdparty first: cd ../thirdparty && ./build.sh -t $TARGET_ARCH $name"
+    exit 1
+  fi
+
+  if [ ! -f "$check_file" ] || [ "$src/$check_file" -nt "$check_file" ] 2>/dev/null; then
+    echo "[INFO] Copying $name to prebuilt/$TARGET_ARCH/$name"
+    rm -rf "$dst"
+    cp -a "$src" "$dst"
+  else
+    echo "[INFO] Using cached $name from prebuilt/$TARGET_ARCH/$name"
+  fi
+}
+
+docker_do_build() {
+  local base_image
+  base_image="$(get_image_name)"
+
+  local prebuilt_opencv="$REPO_ROOT/prebuilt/$TARGET_ARCH/opencv"
+  local prebuilt_libcurl="$REPO_ROOT/prebuilt/$TARGET_ARCH/libcurl"
+  local thirdparty_opencv="$REPO_ROOT/../thirdparty/output/$TARGET_ARCH/opencv"
+  local thirdparty_libcurl="$REPO_ROOT/../thirdparty/output/$TARGET_ARCH/libcurl"
+
+  sync_prebuilt "opencv" "$thirdparty_opencv" "$prebuilt_opencv" "lib/libopencv_core.so"
+  sync_prebuilt "libcurl" "$thirdparty_libcurl" "$prebuilt_libcurl" "lib/libcurl.so"
+
+  local clean_arg=()
+  [ "$CLEAN_BUILD" = true ] && clean_arg=(-c)
+
+  echo "[INFO] Docker 编译 (arch: $TARGET_ARCH${clean_arg:+, clean build})..."
+
+  docker run --rm \
+    --network host \
+    -e http_proxy="${http_proxy:-}" \
+    -e https_proxy="${https_proxy:-}" \
+    -e no_proxy="${no_proxy:-}" \
+    -e OPENCV_DIR=/opt/opencv \
+    -e CURL_DIR=/opt/libcurl \
+    -e _ROS2_BUILD_IN_DOCKER=1 \
+    -u "$(id -u):$(id -g)" \
+    -v "$REPO_ROOT:/ws" \
+    -v "$prebuilt_opencv:/opt/opencv:ro" \
+    -v "$prebuilt_libcurl:/opt/libcurl:ro" \
+    "$base_image" \
+    bash /ws/scripts/build.sh "$DISTRO" --arch "$TARGET_ARCH" --in-docker \
+      "${clean_arg[@]}" -o "/ws/output/$DISTRO"
+
+  local arch_output="$OUTPUT_DIR/$TARGET_ARCH"
+  if [ ! -f "$arch_output/$TARBALL" ]; then
+    echo "错误: 编译产物未生成: $arch_output/$TARBALL"
+    exit 1
+  fi
+
+  local size
+  size="$(du -sh "$arch_output/$TARBALL" | cut -f1)"
+  echo "[OK] 产物: $arch_output/$TARBALL ($size)"
+}
+
+# ─── 全编译模式 ───
+
+build_all() {
+  local builds=(
+    "humble x86_64"
+    "humble aarch64"
+    "jazzy x86_64"
+    "jazzy aarch64"
+  )
+  local results=() tarballs=() failed=0
+  local start_all
+  start_all=$(date +%s)
+
+  for entry in "${builds[@]}"; do
+    local distro arch
+    read -r distro arch <<< "$entry"
+    local tb="$REPO_ROOT/output/$distro/$arch/ros2-${distro}-${arch}.tar.gz"
+
+    echo ""
+    echo "############################################################"
+    echo "## 全编译 [$distro $arch]"
+    echo "############################################################"
+
+    local clean_flag=()
+    [ "$CLEAN_BUILD" = true ] && clean_flag=(-c)
+
+    if bash "$SCRIPT_DIR/build.sh" "$distro" -t "$arch" ${NO_CACHE:+"$NO_CACHE"} "${clean_flag[@]}"; then
+      local sz
+      sz="$(du -sh "$tb" 2>/dev/null | cut -f1)"
+      results+=("  ✅ $distro $arch  $(printf '%6s' "${sz:-?}")")
+      tarballs+=("$tb")
+    else
+      results+=("  ❌ $distro $arch  FAILED")
+      failed=1
+    fi
+  done
+
+  local all_elapsed
+  all_elapsed=$(($(date +%s) - start_all))
+
+  echo ""
+  echo "=========================================="
+  echo " 全编译结果"
+  echo "=========================================="
+  printf '%s\n' "${results[@]}"
+  printf '[OK] 总耗时: %d分%d秒\n' $((all_elapsed / 60)) $((all_elapsed % 60))
+
+  if [ $failed -eq 1 ]; then
+    echo ""
+    echo "[WARN] 部分编译失败，请检查上述 ❌ 项。"
+    return 1
+  fi
+
+  echo ""
+  echo "=========================================="
+  echo " GitHub Release 操作指引"
+  echo "=========================================="
+  echo ""
+  echo "  请将 VERSION 文件中的版本号同步为 tag:"
+  echo "    cat VERSION"
+  echo ""
+  echo "  创建 Release 并上传所有 tarball:"
+  echo "    gh release create \"\$(cat VERSION)\" \\"
+  for tb in "${tarballs[@]}"; do
+    echo "      \"${tb#$REPO_ROOT/}\" \\"
+  done
+  echo "      --title \"\$(cat VERSION)\" \\"
+  echo "      --notes \"Release notes\""
+}
+
 # ─── 主流程 ───
 
 parse_args "$@"
-preflight_check
-
-TARBALL="ros2-${DISTRO}-${TARGET_ARCH}.tar.gz"
-
-echo "=========================================="
-echo " 编译 ROS2 ${DISTRO^^} (${TARGET_ARCH})"
-echo "=========================================="
 
 START_TIME=$(date +%s)
 
-clean_env
-cd "$SRC_DIR"
-mark_ignore_pkgs
-do_build
+if [ "$BUILD_ALL" = true ]; then
+  build_all
+  exit $?
+fi
+
+case "$BUILD_MODE" in
+  docker)
+    echo "=========================================="
+    echo " Docker 编译 ROS2 ${DISTRO^^} (${TARGET_ARCH})"
+    echo "=========================================="
+    mkdir -p "$OUTPUT_DIR"
+    docker_preflight
+    docker_build_base_image
+    docker_do_build
+    ;;
+  native)
+    preflight_check
+    echo "=========================================="
+    echo " 编译 ROS2 ${DISTRO^^} (${TARGET_ARCH})"
+    echo "=========================================="
+    clean_env
+    cd "$SRC_DIR"
+    mark_ignore_pkgs
+    do_build
+    ;;
+  in-docker)
+    preflight_check
+    echo "=========================================="
+    echo " 编译 ROS2 ${DISTRO^^} (${TARGET_ARCH})"
+    echo "=========================================="
+    clean_env
+    cd "$SRC_DIR"
+    mark_ignore_pkgs
+    do_build
+    ;;
+esac
 
 ELAPSED=$(($(date +%s) - START_TIME))
 printf "[OK] 总耗时: %d分%d秒\n" $((ELAPSED / 60)) $((ELAPSED % 60))

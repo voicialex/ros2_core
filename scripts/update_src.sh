@@ -141,10 +141,31 @@ verify_vendor_src() {
     echo "[OK] vendor 上游源码就绪 ($n 个)"
 }
 
+bump_version() {
+	  local ver_file="$REPO_ROOT/VERSION"
+	  local today="v$(date +%Y.%m)"
+
+	  if [ -f "$ver_file" ]; then
+	    local cur
+	    cur=$(cat "$ver_file")
+	    if [[ "$cur" == "$today"* ]]; then
+	      # 同月: 递增 patch 号
+	      local patch="${cur##*.}"
+	      echo "${today}.$((patch + 1))" > "$ver_file"
+	    else
+	      echo "${today}.1" > "$ver_file"
+	    fi
+	  else
+	    echo "${today}.1" > "$ver_file"
+	  fi
+	  echo "[INFO] VERSION: $(cat "$ver_file")"
+	}
+
 # ─── main ───
 parse_args "$@"
 ensure_vcstool
 mkdir -p "$SRC_DIR"
+bump_version
 
 REPOS_FILES=("$REPO_ROOT/repos/${DISTRO}.repos")
 for f in "$REPO_ROOT/repos/${DISTRO}"-*.repos; do

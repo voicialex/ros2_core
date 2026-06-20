@@ -20,7 +20,9 @@ RUN sed -i 's|http://archive.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/so
         gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
         libboost-dev:arm64 \
         libssl-dev:arm64 \
+        libpython3-dev:arm64 \
         libwebp-dev:arm64 \
+        libyaml-cpp-dev:arm64 \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /usr/lib/python3*/EXTERNALLY-MANAGED \
     && pip3 install --break-system-packages colcon-common-extensions vcstool
@@ -46,5 +48,15 @@ RUN sed -i 's|http://archive.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/so
         libpython3-dev:arm64 \
         libwebp-dev:arm64 \
     && rm -rf /var/lib/apt/lists/* \
-    && pip3 install colcon-common-extensions vcstool 'empy<4'
+    && pip3 install colcon-common-extensions vcstool 'empy<4' \
+    # Fix: libpython3-dev:arm64 may not install multiarch pyconfig.h on Ubuntu 22.04.
+    # The stub pyconfig.h at /usr/include/python3.10/ redirects to the arch-specific
+    # file, so we need /usr/include/aarch64-linux-gnu/python3.10/pyconfig.h to exist.
+    && apt-get update && apt-get download libpython3.10-dev:arm64 \
+    && mkdir -p /tmp/py-arm64 /usr/include/aarch64-linux-gnu/python3.10 \
+    && dpkg -x libpython3.10-dev_*.deb /tmp/py-arm64 \
+    && _pyconfig_src="$(find /tmp/py-arm64 -name pyconfig.h -path '*aarch64*' | head -1)" \
+    && [ -n "$_pyconfig_src" ] || _pyconfig_src="$(find /tmp/py-arm64 -name pyconfig.h | head -1)" \
+    && cp "$_pyconfig_src" /usr/include/aarch64-linux-gnu/python3.10/pyconfig.h \
+    && rm -rf /tmp/py-arm64 libpython3.10-dev_*.deb /var/lib/apt/lists/*
 COPY toolchain/ /opt/toolchain/
