@@ -297,20 +297,45 @@ do_build() {
     cmake_args+=("-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-rpath-link,$install_base/lib")
   fi
 
-  local merge_install_arg=()
-  if [ "$TARGET_ARCH" != "$(uname -m)" ]; then
-    merge_install_arg=(--merge-install)
-  fi
-
   colcon --log-base "$log_base" build \
     --build-base "$build_base" \
     --install-base "$install_base" \
-    "${merge_install_arg[@]}" \
+    --merge-install \
     --cmake-args "${cmake_args[@]}" \
     --no-warn-unused-cli \
     --packages-up-to "${TARGET_PKGS[@]}"
 
+  # ros2cli 依赖 packaging 模块（pip 装在 /usr/local/lib，colcon install 里没有）
+  # 拷到 install_base 让 tarball 自包含
+  local py_ver
+  py_ver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  local py_sp="$install_base/lib/python${py_ver}/site-packages"
+  for pkg_src_dir in /usr/local/lib/python${py_ver}/dist-packages/packaging \
+                     /usr/lib/python3/dist-packages/packaging; do
+    if [ -d "$pkg_src_dir" ]; then
+      mkdir -p "$py_sp"
+      cp -a "$pkg_src_dir" "$py_sp/" 2>/dev/null || true
+      cp -a /usr/local/lib/python${py_ver}/dist-packages/packaging-*.dist-info "$py_sp/" 2>/dev/null || true
+      cp -a /usr/local/lib/python${py_ver}/dist-packages/packaging-*.egg-info "$py_sp/" 2>/dev/null || true
+      echo "[INFO] 拷贝 packaging 模块到 install"
+      break
+    fi
+  done
+
   echo "[INFO] 打包 $TARBALL..."
+  local strip_tool="strip"
+  if [ "$TARGET_ARCH" != "$(uname -m)" ]; then
+    strip_tool="${TARGET_ARCH}-linux-gnu-strip"
+    command -v "$strip_tool" >/dev/null 2>&1 || strip_tool="strip"
+  fi
+  echo "[INFO] Strip ELF binaries ($strip_tool)..."
+  find "$install_base" -type f \( -name "*.so" -o -name "*.so.*" -o -perm -u+x -o -path "*/bin/*" \) -print0 \
+    | while IFS= read -r -d '' f; do
+        if [ "$(head -c 4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
+          "$strip_tool" --strip-all "$f" 2>/dev/null || true
+        fi
+      done
+
   mkdir -p "$arch_dir"
   tar czf "$arch_dir/$TARBALL" -C "$install_base" .
 
