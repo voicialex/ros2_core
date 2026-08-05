@@ -218,12 +218,12 @@ purge_stale_vendor_builds() {
 
   # Python extension ABI is derived from the target architecture. Reconfigure
   # all packages when a previous aarch64 build cached the host x86_64 suffix.
+  # Only check .so filenames, not file contents — CMakeCache and logs legitimately
+  # contain x86_64 paths (the host) even in a correct aarch64 cross-build.
   if [ "$TARGET_ARCH" = "aarch64" ] \
-    && grep -Rql 'cpython-[0-9]*-x86_64-linux-gnu' "$build_base" 2>/dev/null; then
+    && find "$build_base" -name '*cpython-*-x86_64-linux-gnu.so' -print -quit 2>/dev/null | grep -q .; then
     echo "[INFO] 清除带有宿主 Python ABI 的 aarch64 编译缓存"
     rm -rf "$build_base"
-    # The old install tree contains a generated python3 wrapper. Colcon uses
-    # install_base/bin first while rebuilding, so remove it with the cache.
     rm -rf "$OUTPUT_DIR/${TARGET_ARCH}/colcon_install"
   fi
 }
@@ -261,12 +261,17 @@ package_python_runtime() {
     x86_64)  target_multiarch="x86_64-linux-gnu" ;;
   esac
   local python_lib_dir="$runtime_root/usr/lib/${target_multiarch}"
+  # Ubuntu 24.04 (noble) renamed libpython3.12 to libpython3.12t64 and merged
+  # libmpdec3 into the Python runtime package.
+  local python_lib_package="libpython${py_ver}"
+  [ "$py_ver" = "3.12" ] && python_lib_package="libpython${py_ver}t64"
   local runtime_debs=(
     "python${py_ver}-minimal" "libpython${py_ver}-minimal"
-    "libpython${py_ver}-stdlib" "libpython${py_ver}" "python${py_ver}"
+    "libpython${py_ver}-stdlib" "$python_lib_package" "python${py_ver}"
     "python3-numpy" "python3-yaml" "python3-netifaces"
-    "libmpdec3" "libblas3" "liblapack3" "libgfortran5" "libyaml-0-2"
+    "libblas3" "liblapack3" "libgfortran5" "libyaml-0-2"
   )
+  [ "$py_ver" != "3.12" ] && runtime_debs+=("libmpdec3")
   local package deb found
 
   [ "$ENABLE_CLI" = true ] || return 0
@@ -368,7 +373,7 @@ EOF
   find "$install_base/bin" "$install_base/lib" -type f -exec grep -Il '^#!/usr/bin/python3$' {} + 2>/dev/null \
     | while read -r script; do
         sed -i '1s|^#!/usr/bin/python3$|#!/usr/bin/env python3|' "$script"
-      done
+      done || true
 
   echo "[INFO] 已打包 Python ${py_ver} 运行时"
 }
@@ -410,6 +415,12 @@ do_build() {
     purge_stale_vendor_builds "$build_base"
   fi
 
+  # Remove Python runtime artifacts left by a previous package_python_runtime call.
+  # Colcon picks up install_base/bin/python3 and tries to execute target-arch ELF.
+  rm -rf "$install_base/python"
+  rm -f "$install_base/bin/python3"*
+  rm -f "$install_base/ros2-env."*
+
   local features=""
   [ "$ENABLE_VISION" = true ] && features+="vision "
   [ "$ENABLE_CLI" = true ] && features+="cli"
@@ -427,6 +438,9 @@ do_build() {
   fi
   echo "[INFO] Using OpenCV from: $opencv_dir"
 
+  local py_ver
+  py_ver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+
   local cmake_args=(
     -DCMAKE_BUILD_TYPE=Release
     -DBUILD_TESTING=OFF
@@ -440,6 +454,28 @@ do_build() {
     -DOpenCV_DIR="$opencv_dir/lib/cmake/opencv4"
     -DCV_BRIDGE_DISABLE_PYTHON=OFF
   )
+
+  # Native builds use amd64 Boost.Python downloaded into the image without
+  # installing it, because Ubuntu's multiarch dev packages conflict.
+  if [ "$TARGET_ARCH" = "x86_64" ] && [ -d /opt/boost-python-amd64 ]; then
+    local py_abi py_lib
+    py_abi="${py_ver//./}"
+    py_lib="$(find "/opt/boost-python-amd64/usr/lib/x86_64-linux-gnu" \
+      -maxdepth 1 -name "libboost_python${py_abi}.so" -print -quit)"
+    if [ -z "$py_lib" ]; then
+      echo "[ERROR] Host Boost.Python ${py_ver} library not found"
+      exit 1
+    fi
+    cmake_args+=(
+      -DBoost_NO_BOOST_CMAKE=ON
+      -DBoost_NO_SYSTEM_PATHS=ON
+      -DBOOST_ROOT=/usr
+      -DBoost_INCLUDE_DIR=/usr/include
+      -DBoost_LIBRARY_DIR_RELEASE="$(dirname "$py_lib")"
+      -DBoost_PYTHON3_LIBRARY_RELEASE="$py_lib"
+      -DBoost_PYTHON3_VERSION=312
+    )
+  fi
 
   # Cross-compile: add toolchain
   if [ "$TARGET_ARCH" != "$(uname -m)" ]; then
@@ -467,8 +503,6 @@ do_build() {
     --no-warn-unused-cli \
     --packages-up-to "${TARGET_PKGS[@]}"
 
-  local py_ver
-  py_ver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
   package_runtime "$install_base" "$py_ver" "$opencv_dir"
 
   echo "[INFO] 打包 $TARBALL..."
@@ -649,6 +683,21 @@ build_all() {
     return 1
   fi
 
+  # Collect all tarballs into a single staging directory for easy upload.
+  local staging_dir="$REPO_ROOT/output/release"
+  rm -rf "$staging_dir"
+  mkdir -p "$staging_dir"
+  for tb in "${tarballs[@]}"; do
+    cp "$tb" "$staging_dir/"
+  done
+
+  echo ""
+  echo "=========================================="
+  echo " 发布目录"
+  echo "=========================================="
+  echo "  $staging_dir/"
+  ls -lh "$staging_dir"/ros2-*.tar.gz | awk '{print "  " $NF, "("$5")"}'
+
   echo ""
   echo "=========================================="
   echo " GitHub Release 操作指引"
@@ -660,7 +709,7 @@ build_all() {
   echo "  创建 Release 并上传所有 tarball:"
   echo "    gh release create \"\$(cat VERSION)\" \\"
   for tb in "${tarballs[@]}"; do
-    echo "      \"${tb#$REPO_ROOT/}\" \\"
+    echo "      \"output/release/$(basename "$tb")\" \\"
   done
   echo "      --title \"\$(cat VERSION)\" \\"
   echo "      --notes \"Release notes\""

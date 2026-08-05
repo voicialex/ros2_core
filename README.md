@@ -1,6 +1,6 @@
 # ros2_core
 
-Pre-built ROS2 core libraries for [buddy_robot](https://github.com/voicialex/buddy).
+Pre-built ROS2 libraries for [buddy_robot](https://github.com/voicialex/buddy). The default package includes C++, Python, ROS 2 CLI, FastDDS, and vision support.
 
 ## Releases
 
@@ -31,12 +31,23 @@ ros2 --help
 python3 -c 'import rclpy; from sensor_msgs.msg import Image; import cv_bridge'
 ```
 
-请通过 `source ros2-env.sh` 使用 Python CLI / rclpy；它会启用包内 Python 并隔离
-目标机自带的 Python。C++ 节点仅需 `source setup.bash`。
+请通过对应 shell 的环境脚本使用 Python CLI / rclpy：
+
+- 常规 Bash：`source ros2-env.sh`
+- J6M：`source ros2-env.zsh`（J6M 的 `/bin/bash` 实际链接到 zsh）
+
+环境脚本会启用包内 Python 并隔离目标机自带的 Python。C++ 节点仅需
+`source setup.bash`；J6M 上建议使用 `source ros2-env.zsh`，它会直接设置 ROS2 环境。
 
 ## Build
 
-需要 Docker。默认编译 humble x86_64，加 `--native` 在宿主机直接编译。
+需要 Docker。默认使用 Docker 在容器内编译；`--native` 才会在宿主机直接编译。
+
+ARM64/J6M 构建使用 Ubuntu Docker 容器内的 `aarch64-linux-gnu-g++` 交叉编译器，
+Host 只负责调度 Docker、挂载源码和 thirdparty 依赖，不会在 Host 上直接编译 ROS2。
+
+Docker 镜像使用 BuildKit cache mount 缓存 apt 索引、deb 包和 pip 下载包，重复构建
+不会重复下载已缓存的依赖。`--no-cache` 会重建镜像层，但仍保留这些 BuildKit 下载缓存。
 
 ```bash
 ./scripts/build.sh                        # Docker 编译 humble x86_64
@@ -45,6 +56,24 @@ python3 -c 'import rclpy; from sensor_msgs.msg import Image; import cv_bridge'
 ./scripts/build.sh --native               # 宿主机直接编译
 ./scripts/build.sh jazzy --native         # 宿主机编译 jazzy x86_64
 ./scripts/build.sh --all                  # 全编译 4 个 tarball（发版用）
+```
+
+J6M 临时验证示例：
+
+```bash
+# Host
+cat output/humble/aarch64/ros2-humble-aarch64.tar.gz \\
+  | pkixssh root@192.168.2.62 'cat > /tmp/ros2-humble-aarch64.tar.gz'
+
+# J6M
+rm -rf /tmp/ros2-humble-aarch64-test
+mkdir -p /tmp/ros2-humble-aarch64-test
+tar xzf /tmp/ros2-humble-aarch64.tar.gz -C /tmp/ros2-humble-aarch64-test
+cd /tmp/ros2-humble-aarch64-test
+source ros2-env.zsh
+python3 --version
+ros2 --help
+python3 -c 'import rclpy; from sensor_msgs.msg import Image; import cv_bridge'
 ```
 
 ## Update source

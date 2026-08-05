@@ -21,7 +21,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         # Cross-compiler
         gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
         libboost-dev:arm64 \
-        libboost-python-dev:arm64 \
+        libboost-python1.83-dev:arm64 \
+        libboost-python1.83.0:arm64 \
         libssl-dev:arm64 \
         libpython3-dev:arm64 \
         libwebp-dev:arm64 \
@@ -29,6 +30,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && rm -f /usr/lib/python3*/EXTERNALLY-MANAGED
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install --break-system-packages colcon-common-extensions vcstool
+
+# Ubuntu's multiarch Boost.Python dev packages conflict across architectures.
+# Download the host amd64 packages without installing them, then use them only
+# for native builds while the arm64 packages remain installed for cross-builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists \
+    apt-get update \
+    && mkdir -p /opt/boost-python-amd64 \
+    && cd /tmp \
+    && _boost_dev="$(apt-cache depends libboost-python-dev:amd64 | sed -n 's/^  Depends: \(libboost-python[0-9.]*-dev\)$/\1/p' | head -1)" \
+    && _boost_runtime="$(apt-cache depends "${_boost_dev}" | sed -n 's/^  Depends: \(libboost-python[0-9.]*\)$/\1/p' | head -1)" \
+    && apt-get download libboost-python-dev:amd64 "${_boost_dev}:amd64" "${_boost_runtime}:amd64" \
+    && for _deb in /tmp/libboost-python*.deb; do dpkg-deb -x "$_deb" /opt/boost-python-amd64; done \
+    && rm -f /tmp/libboost-python*.deb
 
 # Keep target Python runtime debs for self-contained ROS2 tarballs.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -38,15 +53,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && cd /opt/ros2-runtime-debs/amd64 \
     && apt-get download \
         python3.12-minimal:amd64 libpython3.12-minimal:amd64 \
-        libpython3.12-stdlib:amd64 libpython3.12:amd64 python3.12:amd64 \
+        libpython3.12-stdlib:amd64 libpython3.12t64:amd64 python3.12:amd64 \
         python3-numpy:amd64 python3-yaml:amd64 python3-netifaces:amd64 \
-        libmpdec3:amd64 libblas3:amd64 liblapack3:amd64 libgfortran5:amd64 libyaml-0-2:amd64 \
+        libblas3:amd64 liblapack3:amd64 libgfortran5:amd64 libyaml-0-2:amd64 \
     && cd /opt/ros2-runtime-debs/arm64 \
     && apt-get download \
         python3.12-minimal:arm64 libpython3.12-minimal:arm64 \
-        libpython3.12-stdlib:arm64 libpython3.12:arm64 python3.12:arm64 \
+        libpython3.12-stdlib:arm64 libpython3.12t64:arm64 python3.12:arm64 \
         python3-numpy:arm64 python3-yaml:arm64 python3-netifaces:arm64 \
-        libmpdec3:arm64 libblas3:arm64 liblapack3:arm64 libgfortran5:arm64 libyaml-0-2:arm64
+        libblas3:arm64 liblapack3:arm64 libgfortran5:arm64 libyaml-0-2:arm64
 COPY toolchain/ /opt/toolchain/
 
 # ─── Humble (Ubuntu 22.04, x86 native + arm64 cross) ───
@@ -67,12 +82,28 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
         libc6-dev-arm64-cross \
         libboost-dev:arm64 \
-        libboost-python-dev:arm64 \
+        libboost-python1.74-dev:arm64 \
+        libboost-python1.74.0:arm64 \
         libssl-dev:arm64 \
         libpython3-dev:arm64 \
         libwebp-dev:arm64
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install colcon-common-extensions vcstool 'empy<4'
+
+# Ubuntu's multiarch Boost.Python dev packages conflict across architectures.
+# Keep the host amd64 development files unpacked for native builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists \
+    apt-get update \
+    && mkdir -p /opt/boost-python-amd64 \
+    && cd /tmp \
+    && apt-get download \
+        libboost-python-dev:amd64 \
+        libboost-python1.83-dev:amd64 \
+        libboost-python1.83.0:amd64 \
+    && for _deb in /tmp/libboost-python*.deb; do dpkg-deb -x "$_deb" /opt/boost-python-amd64; done \
+    && rm -f /tmp/libboost-python*.deb
+
 # Fix: libpython3-dev:arm64 may not install multiarch pyconfig.h on Ubuntu 22.04.
 # The stub pyconfig.h at /usr/include/python3.10/ redirects to the arch-specific
 # file, so we need /usr/include/aarch64-linux-gnu/python3.10/pyconfig.h to exist.
@@ -96,11 +127,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         python3.10-minimal:amd64 libpython3.10-minimal:amd64 \
         libpython3.10-stdlib:amd64 libpython3.10:amd64 python3.10:amd64 \
         python3-numpy:amd64 python3-yaml:amd64 python3-netifaces:amd64 \
-        libmpdec3:amd64 libblas3:amd64 liblapack3:amd64 libgfortran5:amd64 libyaml-0-2:amd64 \
+        libblas3:amd64 liblapack3:amd64 libgfortran5:amd64 libyaml-0-2:amd64 \
     && cd /opt/ros2-runtime-debs/arm64 \
     && apt-get download \
         python3.10-minimal:arm64 libpython3.10-minimal:arm64 \
         libpython3.10-stdlib:arm64 libpython3.10:arm64 python3.10:arm64 \
         python3-numpy:arm64 python3-yaml:arm64 python3-netifaces:arm64 \
-        libmpdec3:arm64 libblas3:arm64 liblapack3:arm64 libgfortran5:arm64 libyaml-0-2:arm64
+        libblas3:arm64 liblapack3:arm64 libgfortran5:arm64 libyaml-0-2:arm64
 COPY toolchain/ /opt/toolchain/
