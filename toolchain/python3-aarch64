@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Proxy the host interpreter for CMake configuration during cross-compilation.
+# The target interpreter cannot execute on the host; only the ABI tuple differs.
+set -o pipefail
+python3 "$@" | sed 's/x86_64-linux-gnu/aarch64-linux-gnu/g'

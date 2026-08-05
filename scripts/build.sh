@@ -215,6 +215,17 @@ purge_stale_vendor_builds() {
     echo "[INFO] 清除 foonathan_memory_vendor 旧缓存 (foo_mem_src → foonathan_memory_src)"
     rm -rf "$foonathan_build"
   fi
+
+  # Python extension ABI is derived from the target architecture. Reconfigure
+  # all packages when a previous aarch64 build cached the host x86_64 suffix.
+  if [ "$TARGET_ARCH" = "aarch64" ] \
+    && grep -Rql 'cpython-[0-9]*-x86_64-linux-gnu' "$build_base" 2>/dev/null; then
+    echo "[INFO] 清除带有宿主 Python ABI 的 aarch64 编译缓存"
+    rm -rf "$build_base"
+    # The old install tree contains a generated python3 wrapper. Colcon uses
+    # install_base/bin first while rebuilding, so remove it with the cache.
+    rm -rf "$OUTPUT_DIR/${TARGET_ARCH}/colcon_install"
+  fi
 }
 
 clean_env() {
@@ -224,6 +235,159 @@ clean_env() {
     unset "$var" 2>/dev/null || true
   done
   export PATH="$(echo "$PATH" | tr ':' '\n' | grep -v '/opt/ros' | paste -sd:)"
+}
+
+copy_python_module() {
+  local module=$1 dest=$2 path
+  path=$(python3 -c "import importlib.util; s = importlib.util.find_spec('$module'); print(s.submodule_search_locations[0] if s and s.submodule_search_locations else (s.origin if s else ''))")
+  if [ -z "$path" ] || [ ! -e "$path" ]; then
+    echo "[ERROR] Python runtime module not found: $module"
+    return 1
+  fi
+  cp -a "$path" "$dest/"
+}
+
+package_python_runtime() {
+  local install_base=$1 py_ver=$2 runtime_root="$install_base/python"
+  local deb_arch="$TARGET_ARCH"
+  case "$deb_arch" in
+    x86_64) deb_arch="amd64" ;;
+    aarch64) deb_arch="arm64" ;;
+  esac
+  local deb_dir="/opt/ros2-runtime-debs/$deb_arch"
+  local target_multiarch
+  case "$TARGET_ARCH" in
+    aarch64) target_multiarch="aarch64-linux-gnu" ;;
+    x86_64)  target_multiarch="x86_64-linux-gnu" ;;
+  esac
+  local python_lib_dir="$runtime_root/usr/lib/${target_multiarch}"
+  local runtime_debs=(
+    "python${py_ver}-minimal" "libpython${py_ver}-minimal"
+    "libpython${py_ver}-stdlib" "libpython${py_ver}" "python${py_ver}"
+    "python3-numpy" "python3-yaml" "python3-netifaces"
+    "libmpdec3" "libblas3" "liblapack3" "libgfortran5" "libyaml-0-2"
+  )
+  local package deb found
+
+  [ "$ENABLE_CLI" = true ] || return 0
+  if [ ! -d "$deb_dir" ]; then
+    echo "[ERROR] Python runtime debs not found: $deb_dir"
+    echo "[HINT] Rebuild the Docker base image: ./scripts/build.sh $DISTRO --no-cache"
+    exit 1
+  fi
+
+  rm -rf "$runtime_root"
+  mkdir -p "$runtime_root"
+  for package in "${runtime_debs[@]}"; do
+    found=false
+    for deb in "$deb_dir"/"${package}"_*_"${deb_arch}".deb; do
+      [ -f "$deb" ] || continue
+      dpkg-deb -x "$deb" "$runtime_root"
+      found=true
+      break
+    done
+    if [ "$found" = false ]; then
+      echo "[ERROR] Missing ${deb_arch} runtime deb: $package"
+      exit 1
+    fi
+  done
+
+  # These ROS CLI dependencies are installed on the build image, not by colcon.
+  local py_site="$runtime_root/usr/lib/python${py_ver}/site-packages"
+  mkdir -p "$py_site"
+  for package in argcomplete packaging setuptools pkg_resources; do
+    copy_python_module "$package" "$py_site"
+  done
+  cp -a /usr/local/lib/python${py_ver}/dist-packages/argcomplete-*.dist-info "$py_site/" 2>/dev/null || true
+  cp -a /usr/local/lib/python${py_ver}/dist-packages/packaging-*.dist-info "$py_site/" 2>/dev/null || true
+
+  # Dynamic libraries from unpacked runtime debs need to be next to ROS libs.
+  # Use find + cp to handle subdirectories (e.g. blas/ for libblas.so.3).
+  find "$runtime_root/usr/lib/${target_multiarch}" -name '*.so*' -type f \
+    -exec cp -a {} "$install_base/lib/" \; 2>/dev/null || true
+  find "$runtime_root/usr/lib/${target_multiarch}" -name '*.so*' -type l \
+    -exec cp -a {} "$install_base/lib/" \; 2>/dev/null || true
+
+  # OpenCV imgcodecs links libwebp at runtime; ship it from the build image.
+  find "/usr/lib/${target_multiarch}" -maxdepth 1 \( -name 'libwebp*' \) \
+    -exec cp -a {} "$install_base/lib/" \; 2>/dev/null || true
+
+  # cv_bridge's Python binding links against target Boost.Python.
+  if [ "$ENABLE_VISION" = true ]; then
+    cp -a /usr/lib/${target_multiarch}/libboost_python*.so.* "$install_base/lib/" 2>/dev/null || true
+  fi
+
+  # ros2 CLI and the ament Python packages expect their install path on sys.path.
+  # The J6M image links /bin/bash to zsh, so it needs a shell-native setup file.
+  cat > "$install_base/ros2-env.sh" <<EOF
+# Source this file from a real Bash shell to enable the bundled Python runtime.
+_ROS2_PREFIX="\$(builtin cd "\$(dirname "\${BASH_SOURCE[0]}")" > /dev/null && pwd)"
+export ROS2_PYTHON_HOME="\$_ROS2_PREFIX/python/usr"
+export PYTHONHOME="\$ROS2_PYTHON_HOME"
+export LD_LIBRARY_PATH="\$_ROS2_PREFIX/lib:\$ROS2_PYTHON_HOME/lib/${target_multiarch}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+export PYTHONPATH="\$_ROS2_PREFIX/lib/python${py_ver}/site-packages:\$_ROS2_PREFIX/local/lib/python${py_ver}/dist-packages:\$ROS2_PYTHON_HOME/lib/python${py_ver}/site-packages:\$ROS2_PYTHON_HOME/lib/python3/dist-packages\${PYTHONPATH:+:\$PYTHONPATH}"
+export PATH="\$_ROS2_PREFIX/bin:\$ROS2_PYTHON_HOME/bin:\$PATH"
+export COLCON_PYTHON_EXECUTABLE="\$ROS2_PYTHON_HOME/bin/python${py_ver}"
+. "\$_ROS2_PREFIX/setup.bash"
+unset _ROS2_PREFIX
+EOF
+  cat > "$install_base/ros2-env.zsh" <<EOF
+# Source this file on J6M, where /bin/bash is linked to zsh.
+_ROS2_PREFIX="\$(builtin cd "\$(dirname "\${(%):-%N}")" > /dev/null && pwd)"
+export ROS2_PYTHON_HOME="\$_ROS2_PREFIX/python/usr"
+export PYTHONHOME="\$ROS2_PYTHON_HOME"
+export AMENT_PREFIX_PATH="\$_ROS2_PREFIX\${AMENT_PREFIX_PATH:+:\$AMENT_PREFIX_PATH}"
+export CMAKE_PREFIX_PATH="\$_ROS2_PREFIX\${CMAKE_PREFIX_PATH:+:\$CMAKE_PREFIX_PATH}"
+export COLCON_PREFIX_PATH="\$_ROS2_PREFIX\${COLCON_PREFIX_PATH:+:\$COLCON_PREFIX_PATH}"
+export LD_LIBRARY_PATH="\$_ROS2_PREFIX/lib:\$ROS2_PYTHON_HOME/lib/${target_multiarch}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+export PYTHONPATH="\$_ROS2_PREFIX/lib/python${py_ver}/site-packages:\$_ROS2_PREFIX/local/lib/python${py_ver}/dist-packages:\$ROS2_PYTHON_HOME/lib/python${py_ver}/site-packages:\$ROS2_PYTHON_HOME/lib/python3/dist-packages\${PYTHONPATH:+:\$PYTHONPATH}"
+export PATH="\$_ROS2_PREFIX/bin:\$ROS2_PYTHON_HOME/bin:\$PATH"
+export COLCON_PYTHON_EXECUTABLE="\$ROS2_PYTHON_HOME/bin/python${py_ver}"
+unset _ROS2_PREFIX
+EOF
+  chmod +x "$install_base/ros2-env.sh" "$install_base/ros2-env.zsh"
+
+  # The generated scripts use /usr/bin/python3. Rewrite only their interpreter
+  # line to a relocatable wrapper while leaving normal ROS package code intact.
+  mkdir -p "$install_base/bin"
+  cat > "$install_base/bin/python3" <<EOF
+#!/bin/sh
+_ROS2_PREFIX="\$(CDPATH= cd -- "\$(dirname "\$0")/.." && pwd)"
+export PYTHONHOME="\$_ROS2_PREFIX/python/usr"
+export AMENT_PREFIX_PATH="\$_ROS2_PREFIX\${AMENT_PREFIX_PATH:+:\$AMENT_PREFIX_PATH}"
+export CMAKE_PREFIX_PATH="\$_ROS2_PREFIX\${CMAKE_PREFIX_PATH:+:\$CMAKE_PREFIX_PATH}"
+export COLCON_PREFIX_PATH="\$_ROS2_PREFIX\${COLCON_PREFIX_PATH:+:\$COLCON_PREFIX_PATH}"
+export LD_LIBRARY_PATH="\$_ROS2_PREFIX/lib:\$PYTHONHOME/lib/${target_multiarch}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+export PYTHONPATH="\$_ROS2_PREFIX/lib/python${py_ver}/site-packages:\$_ROS2_PREFIX/local/lib/python${py_ver}/dist-packages:\$PYTHONHOME/lib/python${py_ver}/site-packages:\$PYTHONHOME/lib/python3/dist-packages\${PYTHONPATH:+:\$PYTHONPATH}"
+exec "\$PYTHONHOME/bin/python${py_ver}" "\$@"
+EOF
+  chmod +x "$install_base/bin/python3"
+  if [ ! -e "$install_base/bin/python${py_ver}" ]; then
+    ln -s python3 "$install_base/bin/python${py_ver}"
+  fi
+  find "$install_base/bin" "$install_base/lib" -type f -exec grep -Il '^#!/usr/bin/python3$' {} + 2>/dev/null \
+    | while read -r script; do
+        sed -i '1s|^#!/usr/bin/python3$|#!/usr/bin/env python3|' "$script"
+      done
+
+  echo "[INFO] 已打包 Python ${py_ver} 运行时"
+}
+
+package_opencv_runtime() {
+  local install_base=$1 opencv_dir=$2 lib
+  [ "$ENABLE_VISION" = true ] || return 0
+
+  for lib in "$opencv_dir"/lib/libopencv_*.so.*; do
+    [ -f "$lib" ] || continue
+    cp -a "$lib" "$install_base/lib/"
+  done
+  echo "[INFO] 已打包 OpenCV 运行时"
+}
+
+package_runtime() {
+  local install_base=$1 py_ver=$2 opencv_dir=$3
+  package_python_runtime "$install_base" "$py_ver"
+  package_opencv_runtime "$install_base" "$opencv_dir"
 }
 
 mark_ignore_pkgs() {
@@ -274,24 +438,22 @@ do_build() {
     -DTINYXML2_SOURCE_DIR="$tinyxml2_dir"
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON
     -DOpenCV_DIR="$opencv_dir/lib/cmake/opencv4"
+    -DCV_BRIDGE_DISABLE_PYTHON=OFF
   )
-
-  # Patch cv_bridge to skip Python bindings (we only need C++ lib)
-  local cv_bridge_dir
-  cv_bridge_dir=$(find "$SRC_DIR" -path "*/cv_bridge/CMakeLists.txt" -exec dirname {} \; | head -1)
-  if [ -n "$cv_bridge_dir" ]; then
-    find "$cv_bridge_dir" -name "CMakeLists.txt" -exec \
-      sed -i -E 's/if\(ANDROID[^)]*\)/if(TRUE)/g; s/if\(NOT ANDROID[^)]*\)/if(FALSE)/g' {} \;
-    echo "[INFO] Patched cv_bridge to skip Python bindings"
-  fi
 
   # Cross-compile: add toolchain
   if [ "$TARGET_ARCH" != "$(uname -m)" ]; then
     local toolchain="$REPO_ROOT/toolchain/aarch64-linux-gnu.cmake"
+    local cross_python="$REPO_ROOT/toolchain/python3-aarch64"
     if [ ! -f "$toolchain" ]; then
       toolchain="/opt/toolchain/aarch64-linux-gnu.cmake"
+      cross_python="/opt/toolchain/python3-aarch64"
     fi
-    cmake_args+=(-DCMAKE_TOOLCHAIN_FILE="$toolchain")
+    cmake_args+=(
+      -DCMAKE_TOOLCHAIN_FILE="$toolchain"
+      -DPython3_EXECUTABLE="$cross_python"
+      -DPYTHON_EXECUTABLE="$cross_python"
+    )
     echo "[INFO] 使用交叉编译 toolchain: $toolchain"
     cmake_args+=("-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,$install_base/lib")
     cmake_args+=("-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-rpath-link,$install_base/lib")
@@ -305,22 +467,9 @@ do_build() {
     --no-warn-unused-cli \
     --packages-up-to "${TARGET_PKGS[@]}"
 
-  # ros2cli 依赖 packaging 模块（pip 装在 /usr/local/lib，colcon install 里没有）
-  # 拷到 install_base 让 tarball 自包含
   local py_ver
   py_ver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-  local py_sp="$install_base/lib/python${py_ver}/site-packages"
-  for pkg_src_dir in /usr/local/lib/python${py_ver}/dist-packages/packaging \
-                     /usr/lib/python3/dist-packages/packaging; do
-    if [ -d "$pkg_src_dir" ]; then
-      mkdir -p "$py_sp"
-      cp -a "$pkg_src_dir" "$py_sp/" 2>/dev/null || true
-      cp -a /usr/local/lib/python${py_ver}/dist-packages/packaging-*.dist-info "$py_sp/" 2>/dev/null || true
-      cp -a /usr/local/lib/python${py_ver}/dist-packages/packaging-*.egg-info "$py_sp/" 2>/dev/null || true
-      echo "[INFO] 拷贝 packaging 模块到 install"
-      break
-    fi
-  done
+  package_runtime "$install_base" "$py_ver" "$opencv_dir"
 
   echo "[INFO] 打包 $TARBALL..."
   local strip_tool="strip"

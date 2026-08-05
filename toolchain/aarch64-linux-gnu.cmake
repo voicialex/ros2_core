@@ -37,4 +37,14 @@ set(PYTHON_LIBRARY "/usr/lib/${CMAKE_SYSTEM_PROCESSOR}-linux-gnu/libpython${_py_
 # Jazzy+FindPython3 hints (CMake >=3.28 uses FindPython3 via rosidl_generator_py)
 set(Python3_INCLUDE_DIR "/usr/include/python${_py_ver}" CACHE PATH "Python3 include directory (target arch)")
 set(Python3_LIBRARY "/usr/lib/${CMAKE_SYSTEM_PROCESSOR}-linux-gnu/libpython${_py_ver}.so" CACHE FILEPATH "Python3 library (target arch)")
+
+# CMake packages invoke the host interpreter to discover the extension suffix.
+# Override it because target Python extensions must be importable by aarch64 Python.
+string(REPLACE "." "" _py_abi_ver "${_py_ver}")
+set(_py_soabi "cpython-${_py_abi_ver}-${CMAKE_SYSTEM_PROCESSOR}-linux-gnu")
+set(PYTHON_SOABI "${_py_soabi}" CACHE INTERNAL "Target Python extension ABI" FORCE)
+set(PythonExtra_EXTENSION_SUFFIX ".${_py_soabi}" CACHE INTERNAL "Target Python extension suffix" FORCE)
+set(PYTHON_MODULE_EXTENSION ".${_py_soabi}.so" CACHE INTERNAL "Target pybind11 extension suffix" FORCE)
+unset(_py_abi_ver)
+unset(_py_soabi)
 unset(_py_ver)

@@ -25,7 +25,7 @@ install(FILES
   ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}/${PROJECT_NAME}_export.h
   DESTINATION include/${PROJECT_NAME}/${PROJECT_NAME})
 
-if(FALSE)
+if(NOT CV_BRIDGE_DISABLE_PYTHON)
   Python3_add_library(${PROJECT_NAME}_boost MODULE module.cpp module_opencv3.cpp)
   target_link_libraries(${PROJECT_NAME}_boost PRIVATE
     ${PROJECT_NAME}
